@@ -160,6 +160,25 @@ private fun HomeContent(
             )
         }
 
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Button(
+            onClick = { },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.secondary,
+            ),
+        ) {
+            Text(
+                text = "Đăng ký khuôn mặt",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+
         if (permissionDenied) {
             Spacer(modifier = Modifier.height(14.dp))
             Text(
