@@ -68,7 +68,7 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        buildConfigField("String", "CORE_API_BASE_URL", "\"https://hung-phat-945da1547594.herokuapp.com\"")
+        buildConfigField("String", "CORE_API_BASE_URL", "\"https://40.233.83.234\"")
         buildConfigField("String", "ATTENDANCE_SOURCE_APP", "\"attendance-android\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
