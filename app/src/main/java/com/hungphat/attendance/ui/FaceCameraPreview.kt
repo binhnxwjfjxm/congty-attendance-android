@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.hungphat.attendance.camera.FaceCameraAnalyzer
+import com.hungphat.attendance.camera.FaceFrame
 import com.hungphat.attendance.camera.FaceScanState
 import java.util.concurrent.Executors
 
@@ -24,6 +25,7 @@ import java.util.concurrent.Executors
 fun FaceCameraPreview(
     modifier: Modifier = Modifier,
     onStateChanged: (FaceScanState) -> Unit,
+    onFrameChanged: ((FaceFrame) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -69,7 +71,11 @@ fun FaceCameraPreview(
                 .also {
                     it.setAnalyzer(
                         analysisExecutor,
-                        FaceCameraAnalyzer(detector, onStateChanged),
+                        FaceCameraAnalyzer(
+                            detector = detector,
+                            onStateChanged = onStateChanged,
+                            onFrameChanged = onFrameChanged,
+                        ),
                     )
                 }
 

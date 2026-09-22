@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class FaceCameraAnalyzer(
     private val detector: FaceDetector,
     private val onStateChanged: (FaceScanState) -> Unit,
+    private val onFrameChanged: ((FaceFrame) -> Unit)? = null,
 ) : ImageAnalysis.Analyzer {
     private val processing = AtomicBoolean(false)
     private var stableFrames = 0
@@ -47,6 +48,8 @@ class FaceCameraAnalyzer(
                     yawDegrees = face?.headEulerAngleY ?: 0f,
                     rollDegrees = face?.headEulerAngleZ ?: 0f,
                 )
+
+                onFrameChanged?.invoke(frame)
 
                 val nextState = when (FaceReadinessPolicy.evaluate(frame)) {
                     FaceGuidance.NO_FACE -> {

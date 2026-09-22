@@ -115,7 +115,7 @@ fun AttendanceTerminalScreen() {
             },
         )
 
-        TerminalPage.ENROLLMENT -> EnrollmentContent(
+        TerminalPage.ENROLLMENT -> EnrollmentWorkflowScreen(
             onBack = { page = TerminalPage.HOME },
         )
     }
@@ -407,106 +407,6 @@ private fun HomeContent(
                         color = Color(0xFF7B8794),
                         style = MaterialTheme.typography.bodySmall,
                     )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EnrollmentContent(
-    onBack: () -> Unit,
-) {
-    BrandBackground {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 22.dp, vertical = 18.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onBack) {
-                    Text("‹  Quay lại")
-                }
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "Đăng ký khuôn mặt",
-                    color = BrandNavy,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(26.dp))
-
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
-                color = Color.White.copy(alpha = 0.95f),
-                shadowElevation = 10.dp,
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 26.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.logo),
-                        contentDescription = "Logo Công Ty",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth(0.48f)
-                            .height(72.dp),
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = "Khu vực dành cho quản trị",
-                        color = BrandNavy,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Lô A đã chuẩn bị giao diện cho chế độ đăng ký. Xác thực quản trị, chọn nhân sự và quét đăng ký sẽ được nối theo contract thật ở Lô B.",
-                        color = BrandMuted,
-                        style = MaterialTheme.typography.bodyLarge,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(modifier = Modifier.height(22.dp))
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFF4F7FA),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .background(Color(0xFF8A94A6), CircleShape),
-                            )
-                            Spacer(modifier = Modifier.size(10.dp))
-                            Column {
-                                Text(
-                                    text = "Chưa mở đăng ký",
-                                    color = BrandNavy,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                                Text(
-                                    text = "Không tạo nhân sự hoặc dữ liệu tạm trên thiết bị.",
-                                    color = BrandMuted,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                    }
                 }
             }
         }
