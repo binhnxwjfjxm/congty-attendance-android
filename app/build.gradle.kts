@@ -17,10 +17,12 @@ object FaceNetModelIntegrity {
     }
 }
 
+val faceNetAssetDir = layout.buildDirectory.dir("generated/facenet-assets").get().asFile
+
 val prepareFaceNetModel = tasks.register("prepareFaceNetModel") {
     val modelUrl = "https://raw.githubusercontent.com/shubham0204/OnDevice-Face-Recognition-Android/2a9dd305081b9698d6b41af6a20ba28dc45e6846/app/src/main/assets/facenet.tflite"
     val expectedGitBlobSha = "8254aabae5cc73b8d2c15e7c589730eb3c264b87"
-    val outputFile = layout.buildDirectory.file("generated/facenet-assets/facenet.tflite").get().asFile
+    val outputFile = File(faceNetAssetDir, "facenet.tflite")
 
     outputs.file(outputFile)
 
@@ -89,7 +91,7 @@ android {
     }
     sourceSets {
         getByName("main") {
-            assets.srcDir(layout.buildDirectory.dir("generated/facenet-assets"))
+            assets.srcDir(faceNetAssetDir)
         }
     }
 }
