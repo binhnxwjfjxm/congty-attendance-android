@@ -53,12 +53,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.ZonedDateTime
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 private val AttendanceGreen = Color(0xFF1B7F46)
+private val AttendanceRed = Color(0xFFB42318)
 private val AttendanceNavy = Color(0xFF102A43)
+
+private data class AttendanceFailureState(
+    val message: String,
+    val retryable: Boolean,
+)
 
 @Composable
 fun FaceAttendanceScreen(
@@ -75,6 +83,7 @@ fun FaceAttendanceScreen(
     var processing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var success by remember { mutableStateOf<FaceAttendanceSuccess?>(null) }
+    var failure by remember { mutableStateOf<AttendanceFailureState?>(null) }
     var pendingExitEmbedding by remember { mutableStateOf<FloatArray?>(null) }
     var retryAfter by remember { mutableLongStateOf(0L) }
     var retryEmbedding by remember { mutableStateOf<FloatArray?>(null) }
@@ -106,8 +115,22 @@ fun FaceAttendanceScreen(
 
     LaunchedEffect(success) {
         if (success != null) {
-            delay(3_000)
-            onExit()
+            delay(2_500)
+            success = null
+            message = null
+            scanState = FaceScanState.WAITING
+            retryAfter = System.currentTimeMillis() + 500
+        }
+    }
+
+    LaunchedEffect(failure) {
+        val currentFailure = failure ?: return@LaunchedEffect
+        if (!currentFailure.retryable) {
+            delay(2_500)
+            failure = null
+            message = null
+            scanState = FaceScanState.WAITING
+            retryAfter = System.currentTimeMillis() + 500
         }
     }
 
@@ -119,6 +142,7 @@ fun FaceAttendanceScreen(
         val currentDevice = device ?: return
         if (processing) return
         processing = true
+        failure = null
         message = if (exitReason == null) "Đang xác minh nhân sự..." else "Đang ghi nhận..."
         scope.launch {
             try {
@@ -135,6 +159,7 @@ fun FaceAttendanceScreen(
                         retryEmbedding = null
                         retryKey = null
                         exitKeys = emptyMap()
+                        failure = null
                         success = result.data
                         message = null
                     }
@@ -145,7 +170,11 @@ fun FaceAttendanceScreen(
                             retryKey = null
                             message = "Chọn lý do rời nơi làm việc."
                         } else {
-                            message = result.message
+                            message = null
+                            failure = AttendanceFailureState(
+                                message = result.message,
+                                retryable = result.retryable,
+                            )
                             if (exitReason == null && result.retryable) {
                                 retryEmbedding = embedding
                                 retryKey = idempotencyKey
@@ -158,7 +187,11 @@ fun FaceAttendanceScreen(
                     }
                 }
             } catch (_: Exception) {
-                message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại."
+                message = null
+                failure = AttendanceFailureState(
+                    message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại.",
+                    retryable = true,
+                )
                 if (exitReason == null) {
                     retryEmbedding = embedding
                     retryKey = idempotencyKey
@@ -180,6 +213,7 @@ fun FaceAttendanceScreen(
                         scanState != FaceScanState.READY ||
                         processing ||
                         pendingExitEmbedding != null ||
+                        failure != null ||
                         retryEmbedding != null ||
                         System.currentTimeMillis() < retryAfter
                     ) {
@@ -203,7 +237,12 @@ fun FaceAttendanceScreen(
                             } catch (_: Exception) {
                                 sample.bitmap.recycle()
                                 processing = false
-                                message = "Chưa xử lý được khuôn mặt. Vui lòng thử lại."
+                                message = null
+                                failure = AttendanceFailureState(
+                                    message = "Chưa xử lý được khuôn mặt. Vui lòng thử lại.",
+                                    retryable = false,
+                                )
+                                retryAfter = System.currentTimeMillis() + 2_000
                             }
                         }
                     }
@@ -301,6 +340,21 @@ fun FaceAttendanceScreen(
                         )
                     }
                 }
+            } else if (failure != null) {
+                AttendanceFailureCard(
+                    failure = failure!!,
+                    canRetry = !processing && retryEmbedding != null && retryKey != null,
+                    onRetry = {
+                        val embedding = retryEmbedding
+                        val key = retryKey
+                        if (embedding != null && key != null) {
+                            submitAttendance(
+                                embedding = embedding,
+                                idempotencyKey = key,
+                            )
+                        }
+                    },
+                )
             } else {
                 Box(
                     modifier = Modifier
@@ -343,23 +397,7 @@ fun FaceAttendanceScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             textAlign = TextAlign.Center,
                         )
-                        if (!processing && retryEmbedding != null && retryKey != null) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Button(
-                                onClick = {
-                                    val embedding = retryEmbedding
-                                    val key = retryKey
-                                    if (embedding != null && key != null) {
-                                        submitAttendance(
-                                            embedding = embedding,
-                                            idempotencyKey = key,
-                                        )
-                                    }
-                                },
-                            ) {
-                                Text("Thử lại")
-                            }
-                        }
+
                     }
                 }
             }
@@ -421,9 +459,71 @@ private fun ExitReasonCard(
 }
 
 @Composable
+private fun AttendanceFailureCard(
+    failure: AttendanceFailureState,
+    canRetry: Boolean,
+    onRetry: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        color = Color.White.copy(alpha = 0.97f),
+        shadowElevation = 10.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Surface(
+                modifier = Modifier.size(58.dp),
+                shape = CircleShape,
+                color = AttendanceRed.copy(alpha = 0.12f),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "!",
+                        color = AttendanceRed,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Chưa ghi nhận",
+                color = AttendanceRed,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = failure.message,
+                color = AttendanceNavy,
+                style = MaterialTheme.typography.bodyLarge,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            if (failure.retryable && canRetry) {
+                Button(onClick = onRetry) {
+                    Text("Thử lại")
+                }
+            } else if (!failure.retryable) {
+                Text(
+                    text = "Máy sẽ tự sẵn sàng cho lượt quét tiếp theo.",
+                    color = Color(0xFF52606D),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun AttendanceSuccessCard(result: FaceAttendanceSuccess) {
-    val now = remember(result.eventType) {
-        ZonedDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss", Locale("vi", "VN")))
+    val occurredAt = remember(result.occurredAt) {
+        formatOccurredAt(result.occurredAt)
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -464,7 +564,7 @@ private fun AttendanceSuccessCard(result: FaceAttendanceSuccess) {
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = now,
+                text = occurredAt,
                 color = Color(0xFF52606D),
                 style = MaterialTheme.typography.titleMedium,
             )
@@ -479,6 +579,19 @@ private fun AttendanceSuccessCard(result: FaceAttendanceSuccess) {
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+private fun formatOccurredAt(value: String?): String {
+    if (value.isNullOrBlank()) return "Chưa có giờ ghi nhận"
+    val formatter = DateTimeFormatter.ofPattern("HH:mm:ss", Locale("vi", "VN"))
+    val zone = ZoneId.systemDefault()
+    return runCatching {
+        OffsetDateTime.parse(value).atZoneSameInstant(zone).format(formatter)
+    }.recoverCatching {
+        LocalDateTime.parse(value).format(formatter)
+    }.getOrElse {
+        value
     }
 }
 
