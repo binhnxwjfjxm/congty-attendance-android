@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -180,7 +181,7 @@ private fun BrandLogoCard(
                 painter = painterResource(R.drawable.logo),
                 contentDescription = "Logo Công Ty",
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.size(width = imageWidth, height = imageHeight),
+                modifier = Modifier.requiredSize(width = imageWidth, height = imageHeight),
             )
         }
     }
