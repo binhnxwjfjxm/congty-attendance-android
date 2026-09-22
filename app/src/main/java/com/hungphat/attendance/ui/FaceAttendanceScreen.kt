@@ -169,16 +169,20 @@ fun FaceAttendanceScreen(
                             retryEmbedding = null
                             retryKey = null
                             message = "Chọn lý do rời nơi làm việc."
+                        } else if (exitReason != null) {
+                            failure = null
+                            message = result.message
+                            retryAfter = System.currentTimeMillis() + 1_500
                         } else {
                             message = null
                             failure = AttendanceFailureState(
                                 message = result.message,
                                 retryable = result.retryable,
                             )
-                            if (exitReason == null && result.retryable) {
+                            if (result.retryable) {
                                 retryEmbedding = embedding
                                 retryKey = idempotencyKey
-                            } else if (exitReason == null) {
+                            } else {
                                 retryEmbedding = null
                                 retryKey = null
                             }
@@ -187,12 +191,15 @@ fun FaceAttendanceScreen(
                     }
                 }
             } catch (_: Exception) {
-                message = null
-                failure = AttendanceFailureState(
-                    message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại.",
-                    retryable = true,
-                )
-                if (exitReason == null) {
+                if (exitReason != null) {
+                    failure = null
+                    message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại."
+                } else {
+                    message = null
+                    failure = AttendanceFailureState(
+                        message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại.",
+                        retryable = true,
+                    )
                     retryEmbedding = embedding
                     retryKey = idempotencyKey
                 }
