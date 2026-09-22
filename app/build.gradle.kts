@@ -7,34 +7,47 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val faceNetModelUrl = "https://raw.githubusercontent.com/shubham0204/OnDevice-Face-Recognition-Android/2a9dd305081b9698d6b41af6a20ba28dc45e6846/app/src/main/assets/facenet.tflite"
-val faceNetGitBlobSha = "8254aabae5cc73b8d2c15e7c589730eb3c264b87"
-val faceNetAssetDir = layout.buildDirectory.dir("generated/facenet-assets").get().asFile
-
-fun gitBlobSha(file: File): String {
-    val bytes = file.readBytes()
-    val digest = MessageDigest.getInstance("SHA-1")
-    digest.update("blob ${bytes.size}\u0000".toByteArray(Charsets.UTF_8))
-    digest.update(bytes)
-    return digest.digest().joinToString("") { "%02x".format(it) }
+object FaceNetModelIntegrity {
+    fun gitBlobSha(file: File): String {
+        val bytes = file.readBytes()
+        val digest = MessageDigest.getInstance("SHA-1")
+        digest.update("blob ${bytes.size}\u0000".toByteArray(Charsets.UTF_8))
+        digest.update(bytes)
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 }
 
-val prepareFaceNetModel by tasks.registering {
-    val outputFile = File(faceNetAssetDir, "facenet.tflite")
+val prepareFaceNetModel = tasks.register("prepareFaceNetModel") {
+    val modelUrl = "https://raw.githubusercontent.com/shubham0204/OnDevice-Face-Recognition-Android/2a9dd305081b9698d6b41af6a20ba28dc45e6846/app/src/main/assets/facenet.tflite"
+    val expectedGitBlobSha = "8254aabae5cc73b8d2c15e7c589730eb3c264b87"
+    val outputFile = layout.buildDirectory.file("generated/facenet-assets/facenet.tflite").get().asFile
+
     outputs.file(outputFile)
+
     doLast {
-        if (outputFile.exists() && gitBlobSha(outputFile) == faceNetGitBlobSha) return@doLast
+        if (
+            outputFile.exists() &&
+            FaceNetModelIntegrity.gitBlobSha(outputFile) == expectedGitBlobSha
+        ) {
+            return@doLast
+        }
+
         outputFile.parentFile.mkdirs()
         val temporary = File(outputFile.parentFile, "facenet.tflite.part")
         if (temporary.exists()) temporary.delete()
-        val connection = URI(faceNetModelUrl).toURL().openConnection().apply {
+
+        val connection = URI(modelUrl).toURL().openConnection().apply {
             connectTimeout = 20_000
             readTimeout = 120_000
         }
         connection.getInputStream().use { input ->
             temporary.outputStream().use { output -> input.copyTo(output) }
         }
-        check(gitBlobSha(temporary) == faceNetGitBlobSha) { "FaceNet model integrity check failed" }
+
+        check(FaceNetModelIntegrity.gitBlobSha(temporary) == expectedGitBlobSha) {
+            "FaceNet model integrity check failed"
+        }
+
         if (outputFile.exists()) outputFile.delete()
         check(temporary.renameTo(outputFile)) { "Unable to stage FaceNet model" }
     }
@@ -76,7 +89,7 @@ android {
     }
     sourceSets {
         getByName("main") {
-            assets.srcDir(faceNetAssetDir)
+            assets.srcDir(layout.buildDirectory.dir("generated/facenet-assets"))
         }
     }
 }
