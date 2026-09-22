@@ -1,3 +1,7 @@
+import java.io.File
+import java.net.URI
+import java.security.MessageDigest
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -7,23 +11,23 @@ val faceNetModelUrl = "https://raw.githubusercontent.com/shubham0204/OnDevice-Fa
 val faceNetGitBlobSha = "8254aabae5cc73b8d2c15e7c589730eb3c264b87"
 val faceNetAssetDir = layout.buildDirectory.dir("generated/facenet-assets").get().asFile
 
-fun gitBlobSha(file: java.io.File): String {
+fun gitBlobSha(file: File): String {
     val bytes = file.readBytes()
-    val digest = java.security.MessageDigest.getInstance("SHA-1")
+    val digest = MessageDigest.getInstance("SHA-1")
     digest.update("blob ${bytes.size}\u0000".toByteArray(Charsets.UTF_8))
     digest.update(bytes)
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 val prepareFaceNetModel by tasks.registering {
-    val outputFile = java.io.File(faceNetAssetDir, "facenet.tflite")
+    val outputFile = File(faceNetAssetDir, "facenet.tflite")
     outputs.file(outputFile)
     doLast {
         if (outputFile.exists() && gitBlobSha(outputFile) == faceNetGitBlobSha) return@doLast
         outputFile.parentFile.mkdirs()
-        val temporary = java.io.File(outputFile.parentFile, "facenet.tflite.part")
+        val temporary = File(outputFile.parentFile, "facenet.tflite.part")
         if (temporary.exists()) temporary.delete()
-        val connection = java.net.URI(faceNetModelUrl).toURL().openConnection().apply {
+        val connection = URI(faceNetModelUrl).toURL().openConnection().apply {
             connectTimeout = 20_000
             readTimeout = 120_000
         }
