@@ -113,6 +113,8 @@ fun EnrollmentWorkflowScreen(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var completedAt by remember { mutableStateOf<ZonedDateTime?>(null) }
+    var provisionKey by remember { mutableStateOf<String?>(null) }
+    var provisionSignature by remember { mutableStateOf<String?>(null) }
 
     fun leaveEnrollment() {
         val token = session?.token
@@ -223,7 +225,8 @@ fun EnrollmentWorkflowScreen(
                                             password = ""
                                             ownerCode = ""
                                             ownerCodeRequired = false
-                                            if (deviceStore.load() == null) {
+                                            val storedDevice = deviceStore.load()
+                                            if (storedDevice == null) {
                                                 when (val points = FaceApiClient.loadAttendancePoints(verifiedSession.token)) {
                                                     is ApiResult.Failure -> message = points.message
                                                     is ApiResult.Success -> {
@@ -232,8 +235,23 @@ fun EnrollmentWorkflowScreen(
                                                     }
                                                 }
                                             } else {
-                                                loadDirectory(verifiedSession) {
-                                                    stage = EnrollmentStage.EMPLOYEE_LIST
+                                                when (val verifiedDevice = FaceApiClient.verifyDevice(storedDevice.credential)) {
+                                                    is ApiResult.Success -> {
+                                                        loadDirectory(verifiedSession) {
+                                                            stage = EnrollmentStage.EMPLOYEE_LIST
+                                                        }
+                                                    }
+                                                    is ApiResult.Failure -> {
+                                                        deviceStore.clear()
+                                                        when (val points = FaceApiClient.loadAttendancePoints(verifiedSession.token)) {
+                                                            is ApiResult.Failure -> message = points.message
+                                                            is ApiResult.Success -> {
+                                                                attendancePoints = points.data
+                                                                message = "Máy cần được thiết lập lại trước khi đăng ký khuôn mặt."
+                                                                stage = EnrollmentStage.DEVICE_SETUP
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -265,7 +283,15 @@ fun EnrollmentWorkflowScreen(
                             busy = true
                             message = null
                             try {
-                                val key = IdempotencyKeys.create("attendance-face-device")
+                                val signature = point.id + "|" + deviceName.trim()
+                                val key = if (provisionSignature == signature && provisionKey != null) {
+                                    provisionKey!!
+                                } else {
+                                    IdempotencyKeys.create("attendance-face-device").also {
+                                        provisionSignature = signature
+                                        provisionKey = it
+                                    }
+                                }
                                 when (
                                     val result = FaceApiClient.provisionDevice(
                                         adminToken = adminSession.token,
@@ -277,6 +303,8 @@ fun EnrollmentWorkflowScreen(
                                     is ApiResult.Failure -> message = result.message
                                     is ApiResult.Success -> {
                                         deviceStore.save(result.data)
+                                        provisionKey = null
+                                        provisionSignature = null
                                         loadDirectory(adminSession) {
                                             stage = EnrollmentStage.EMPLOYEE_LIST
                                         }

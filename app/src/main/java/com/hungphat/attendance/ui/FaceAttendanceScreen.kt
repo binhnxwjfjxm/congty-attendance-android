@@ -77,6 +77,9 @@ fun FaceAttendanceScreen(
     var success by remember { mutableStateOf<FaceAttendanceSuccess?>(null) }
     var pendingExitEmbedding by remember { mutableStateOf<FloatArray?>(null) }
     var retryAfter by remember { mutableLongStateOf(0L) }
+    var retryEmbedding by remember { mutableStateOf<FloatArray?>(null) }
+    var retryKey by remember { mutableStateOf<String?>(null) }
+    var exitKeys by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     DisposableEffect(Unit) {
         onDispose { embedder.close() }
@@ -108,12 +111,15 @@ fun FaceAttendanceScreen(
         }
     }
 
-    fun submitAttendance(embedding: FloatArray, exitReason: String? = null) {
+    fun submitAttendance(
+        embedding: FloatArray,
+        exitReason: String? = null,
+        idempotencyKey: String,
+    ) {
         val currentDevice = device ?: return
         if (processing) return
         processing = true
         message = if (exitReason == null) "Đang xác minh nhân sự..." else "Đang ghi nhận..."
-        val key = IdempotencyKeys.create("attendance-face-event")
         scope.launch {
             try {
                 when (
@@ -121,27 +127,42 @@ fun FaceAttendanceScreen(
                         deviceCredential = currentDevice.credential,
                         embedding = embedding,
                         exitReason = exitReason,
-                        idempotencyKey = key,
+                        idempotencyKey = idempotencyKey,
                     )
                 ) {
                     is ApiResult.Success -> {
                         pendingExitEmbedding = null
+                        retryEmbedding = null
+                        retryKey = null
+                        exitKeys = emptyMap()
                         success = result.data
                         message = null
                     }
                     is ApiResult.Failure -> {
                         if (result.code == "EXIT_REASON_REQUIRED") {
                             pendingExitEmbedding = embedding
+                            retryEmbedding = null
+                            retryKey = null
                             message = "Chọn lý do rời nơi làm việc."
                         } else {
-                            pendingExitEmbedding = null
                             message = result.message
+                            if (exitReason == null && result.retryable) {
+                                retryEmbedding = embedding
+                                retryKey = idempotencyKey
+                            } else if (exitReason == null) {
+                                retryEmbedding = null
+                                retryKey = null
+                            }
                             retryAfter = System.currentTimeMillis() + 1_500
                         }
                     }
                 }
             } catch (_: Exception) {
                 message = "Không kết nối được hệ thống Công Ty. Vui lòng thử lại."
+                if (exitReason == null) {
+                    retryEmbedding = embedding
+                    retryKey = idempotencyKey
+                }
                 retryAfter = System.currentTimeMillis() + 1_500
             } finally {
                 processing = false
@@ -159,6 +180,7 @@ fun FaceAttendanceScreen(
                         scanState != FaceScanState.READY ||
                         processing ||
                         pendingExitEmbedding != null ||
+                        retryEmbedding != null ||
                         System.currentTimeMillis() < retryAfter
                     ) {
                         sample.bitmap.recycle()
@@ -171,7 +193,13 @@ fun FaceAttendanceScreen(
                                 }
                                 sample.bitmap.recycle()
                                 processing = false
-                                submitAttendance(embedding)
+                                val key = IdempotencyKeys.create("attendance-face-event")
+                                retryEmbedding = embedding
+                                retryKey = key
+                                submitAttendance(
+                                    embedding = embedding,
+                                    idempotencyKey = key,
+                                )
                             } catch (_: Exception) {
                                 sample.bitmap.recycle()
                                 processing = false
@@ -237,8 +265,19 @@ fun FaceAttendanceScreen(
             } else if (pendingExitEmbedding != null) {
                 ExitReasonCard(
                     busy = processing,
+                    message = message,
                     onChoose = { reason ->
-                        pendingExitEmbedding?.let { submitAttendance(it, reason) }
+                        pendingExitEmbedding?.let { embedding ->
+                            val key = exitKeys[reason]
+                                ?: IdempotencyKeys.create("attendance-face-exit").also {
+                                    exitKeys = exitKeys + (reason to it)
+                                }
+                            submitAttendance(
+                                embedding = embedding,
+                                exitReason = reason,
+                                idempotencyKey = key,
+                            )
+                        }
                     },
                 )
             } else if (!deviceReady) {
@@ -304,6 +343,23 @@ fun FaceAttendanceScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             textAlign = TextAlign.Center,
                         )
+                        if (!processing && retryEmbedding != null && retryKey != null) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = {
+                                    val embedding = retryEmbedding
+                                    val key = retryKey
+                                    if (embedding != null && key != null) {
+                                        submitAttendance(
+                                            embedding = embedding,
+                                            idempotencyKey = key,
+                                        )
+                                    }
+                                },
+                            ) {
+                                Text("Thử lại")
+                            }
+                        }
                     }
                 }
             }
@@ -316,6 +372,7 @@ fun FaceAttendanceScreen(
 @Composable
 private fun ExitReasonCard(
     busy: Boolean,
+    message: String?,
     onChoose: (String) -> Unit,
 ) {
     Surface(
@@ -334,6 +391,14 @@ private fun ExitReasonCard(
                 text = "Chọn đúng lý do để ghi nhận.",
                 color = Color(0xFF52606D),
             )
+            if (!message.isNullOrBlank() && message != "Chọn lý do rời nơi làm việc.") {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Spacer(modifier = Modifier.height(14.dp))
             val choices = listOf(
                 "END_WORK" to "Kết thúc làm việc",
