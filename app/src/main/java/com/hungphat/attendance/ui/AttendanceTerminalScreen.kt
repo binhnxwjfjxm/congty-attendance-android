@@ -106,10 +106,8 @@ fun AttendanceTerminalScreen() {
             },
         )
 
-        TerminalPage.ATTENDANCE -> ScannerContent(
-            state = scanState,
-            onStateChanged = { scanState = it },
-            onCancel = {
+        TerminalPage.ATTENDANCE -> FaceAttendanceScreen(
+            onExit = {
                 scanState = FaceScanState.WAITING
                 page = TerminalPage.HOME
             },
