@@ -2,6 +2,7 @@ package com.hungphat.attendance.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -34,7 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -54,15 +55,23 @@ import androidx.core.content.ContextCompat
 import com.hungphat.attendance.camera.EnrollmentPose
 import com.hungphat.attendance.camera.EnrollmentPosePolicy
 import com.hungphat.attendance.camera.FaceFrame
-import com.hungphat.attendance.camera.FaceReadinessPolicy
 import com.hungphat.attendance.camera.FaceGuidance
+import com.hungphat.attendance.camera.FaceReadinessPolicy
+import com.hungphat.attendance.camera.FaceSample
 import com.hungphat.attendance.camera.FaceScanState
 import com.hungphat.attendance.data.AdminSession
 import com.hungphat.attendance.data.ApiResult
+import com.hungphat.attendance.data.AttendancePointSummary
 import com.hungphat.attendance.data.CoreApiClient
 import com.hungphat.attendance.data.EmployeeSummary
+import com.hungphat.attendance.data.FaceApiClient
+import com.hungphat.attendance.data.IdempotencyKeys
 import com.hungphat.attendance.data.LoginResult
+import com.hungphat.attendance.face.FaceNetEmbedder
+import com.hungphat.attendance.security.DeviceCredentialStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -76,6 +85,7 @@ private val EnrollmentMuted = Color(0xFF52606D)
 
 private enum class EnrollmentStage {
     LOGIN,
+    DEVICE_SETUP,
     EMPLOYEE_LIST,
     SCAN,
     COMPLETE,
@@ -87,10 +97,13 @@ fun EnrollmentWorkflowScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val deviceStore = remember { DeviceCredentialStore(context) }
 
     var stage by remember { mutableStateOf(EnrollmentStage.LOGIN) }
     var session by remember { mutableStateOf<AdminSession?>(null) }
     var employees by remember { mutableStateOf<List<EmployeeSummary>>(emptyList()) }
+    var registeredEmployeeIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var attendancePoints by remember { mutableStateOf<List<AttendancePointSummary>>(emptyList()) }
     var selectedEmployee by remember { mutableStateOf<EmployeeSummary?>(null) }
     var loginName by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -110,6 +123,32 @@ fun EnrollmentWorkflowScreen(
         onBack()
     }
 
+    fun loadDirectory(adminSession: AdminSession, after: () -> Unit) {
+        scope.launch {
+            busy = true
+            message = null
+            try {
+                when (val employeeResult = CoreApiClient.loadEmployees(adminSession.token)) {
+                    is ApiResult.Failure -> message = employeeResult.message
+                    is ApiResult.Success -> {
+                        employees = employeeResult.data
+                        when (val templateResult = FaceApiClient.loadTemplateStatus(adminSession.token)) {
+                            is ApiResult.Failure -> message = templateResult.message
+                            is ApiResult.Success -> {
+                                registeredEmployeeIds = templateResult.data.map { it.employeeId }.toSet()
+                                after()
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                message = "Không tải được dữ liệu đăng ký khuôn mặt. Vui lòng kiểm tra mạng."
+            } finally {
+                busy = false
+            }
+        }
+    }
+
     fun startEmployeeScan(employee: EmployeeSummary) {
         selectedEmployee = employee
         message = null
@@ -117,9 +156,7 @@ fun EnrollmentWorkflowScreen(
             context,
             Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            stage = EnrollmentStage.SCAN
-        }
+        if (granted) stage = EnrollmentStage.SCAN
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
@@ -129,7 +166,7 @@ fun EnrollmentWorkflowScreen(
             stage = EnrollmentStage.SCAN
             message = null
         } else if (!granted) {
-            message = "Cần cho phép Camera để quét đăng ký khuôn mặt."
+            message = "Cần cho phép Camera để đăng ký khuôn mặt."
         }
     }
 
@@ -166,40 +203,36 @@ fun EnrollmentWorkflowScreen(
                                 ownerCode = ""
                                 message = login.message
                             }
-
-                            is LoginResult.Failure -> {
-                                message = login.message
-                            }
-
+                            is LoginResult.Failure -> message = login.message
                             is LoginResult.Success -> {
                                 when (val verified = CoreApiClient.verifySession(login.session)) {
                                     is ApiResult.Failure -> {
                                         message = verified.message
                                         CoreApiClient.logout(login.session.token)
                                     }
-
                                     is ApiResult.Success -> {
                                         val verifiedSession = verified.data
-                                        val permissions = verifiedSession.permissions
                                         val canEnroll =
-                                            permissions.contains(CoreApiClient.EMPLOYEE_READ_PERMISSION) &&
-                                                permissions.contains(CoreApiClient.EMPLOYEE_WRITE_PERMISSION)
+                                            verifiedSession.permissions.contains(CoreApiClient.EMPLOYEE_READ_PERMISSION) &&
+                                                verifiedSession.permissions.contains(CoreApiClient.EMPLOYEE_WRITE_PERMISSION)
                                         if (!canEnroll) {
-                                            message = "Tài khoản này không có quyền quản lý hồ sơ nhân sự để đăng ký khuôn mặt."
+                                            message = "Tài khoản này không có quyền quản lý hồ sơ nhân sự."
                                             CoreApiClient.logout(verifiedSession.token)
                                         } else {
-                                            when (val result = CoreApiClient.loadEmployees(verifiedSession.token)) {
-                                                is ApiResult.Failure -> {
-                                                    message = result.message
-                                                    CoreApiClient.logout(verifiedSession.token)
+                                            session = verifiedSession
+                                            password = ""
+                                            ownerCode = ""
+                                            ownerCodeRequired = false
+                                            if (deviceStore.load() == null) {
+                                                when (val points = FaceApiClient.loadAttendancePoints(verifiedSession.token)) {
+                                                    is ApiResult.Failure -> message = points.message
+                                                    is ApiResult.Success -> {
+                                                        attendancePoints = points.data
+                                                        stage = EnrollmentStage.DEVICE_SETUP
+                                                    }
                                                 }
-
-                                                is ApiResult.Success -> {
-                                                    session = verifiedSession
-                                                    employees = result.data
-                                                    password = ""
-                                                    ownerCode = ""
-                                                    ownerCodeRequired = false
+                                            } else {
+                                                loadDirectory(verifiedSession) {
                                                     stage = EnrollmentStage.EMPLOYEE_LIST
                                                 }
                                             }
@@ -209,13 +242,56 @@ fun EnrollmentWorkflowScreen(
                             }
                         }
                     } catch (_: Exception) {
-                        message = "Không kết nối được hệ thống Công Ty. Vui lòng kiểm tra mạng và thử lại."
+                        message = "Không kết nối được hệ thống Công Ty. Vui lòng kiểm tra mạng."
                     } finally {
                         busy = false
                     }
                 }
             },
         )
+
+        EnrollmentStage.DEVICE_SETUP -> {
+            val adminSession = session
+            if (adminSession == null) {
+                stage = EnrollmentStage.LOGIN
+            } else {
+                EnrollmentDeviceSetupScreen(
+                    points = attendancePoints,
+                    busy = busy,
+                    message = message,
+                    onBack = ::leaveEnrollment,
+                    onProvision = { point, deviceName ->
+                        scope.launch {
+                            busy = true
+                            message = null
+                            try {
+                                val key = IdempotencyKeys.create("attendance-face-device")
+                                when (
+                                    val result = FaceApiClient.provisionDevice(
+                                        adminToken = adminSession.token,
+                                        point = point,
+                                        deviceName = deviceName,
+                                        idempotencyKey = key,
+                                    )
+                                ) {
+                                    is ApiResult.Failure -> message = result.message
+                                    is ApiResult.Success -> {
+                                        deviceStore.save(result.data)
+                                        loadDirectory(adminSession) {
+                                            stage = EnrollmentStage.EMPLOYEE_LIST
+                                        }
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                message = "Không thiết lập được máy chấm công. Vui lòng thử lại."
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                )
+            }
+        }
 
         EnrollmentStage.EMPLOYEE_LIST -> {
             val filteredEmployees = remember(employees, query) {
@@ -230,31 +306,18 @@ fun EnrollmentWorkflowScreen(
                     }
                 }
             }
-
             EnrollmentEmployeeListScreen(
                 adminName = session?.displayName.orEmpty(),
                 query = query,
                 employees = filteredEmployees,
+                registeredEmployeeIds = registeredEmployeeIds,
                 busy = busy,
                 message = message,
                 onQueryChange = { query = it },
                 onBack = ::leaveEnrollment,
                 onRefresh = {
-                    val token = session?.token ?: return@EnrollmentEmployeeListScreen
-                    scope.launch {
-                        busy = true
-                        message = null
-                        try {
-                            when (val result = CoreApiClient.loadEmployees(token)) {
-                                is ApiResult.Success -> employees = result.data
-                                is ApiResult.Failure -> message = result.message
-                            }
-                        } catch (_: Exception) {
-                            message = "Không tải được danh sách nhân sự. Vui lòng kiểm tra mạng."
-                        } finally {
-                            busy = false
-                        }
-                    }
+                    val adminSession = session ?: return@EnrollmentEmployeeListScreen
+                    loadDirectory(adminSession) {}
                 },
                 onSelect = { employee ->
                     startEmployeeScan(employee)
@@ -267,13 +330,16 @@ fun EnrollmentWorkflowScreen(
 
         EnrollmentStage.SCAN -> {
             val employee = selectedEmployee
-            if (employee == null) {
+            val adminToken = session?.token
+            if (employee == null || adminToken.isNullOrBlank()) {
                 stage = EnrollmentStage.EMPLOYEE_LIST
             } else {
                 EnrollmentCaptureScreen(
                     employee = employee,
+                    adminToken = adminToken,
                     onBack = { stage = EnrollmentStage.EMPLOYEE_LIST },
                     onComplete = {
+                        registeredEmployeeIds = registeredEmployeeIds + employee.id
                         completedAt = ZonedDateTime.now()
                         stage = EnrollmentStage.COMPLETE
                     },
@@ -322,38 +388,28 @@ private fun EnrollmentLoginScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 22.dp, vertical = 18.dp),
+                .padding(22.dp),
         ) {
-            EnrollmentTopBar(
-                title = "Đăng ký khuôn mặt",
-                onBack = onBack,
-            )
-
+            EnrollmentTopBar(title = "Đăng ký khuôn mặt", onBack = onBack)
             Spacer(modifier = Modifier.height(22.dp))
-
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(26.dp),
                 color = Color.White,
                 shadowElevation = 8.dp,
             ) {
-                Column(
-                    modifier = Modifier.padding(22.dp),
-                ) {
+                Column(modifier = Modifier.padding(22.dp)) {
                     Text(
                         text = "Xác thực quản trị",
                         color = EnrollmentNavy,
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "Đăng nhập bằng tài khoản Công Ty có quyền quản lý nhân sự.",
                         color = EnrollmentMuted,
-                        style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(modifier = Modifier.height(18.dp))
-
                     OutlinedTextField(
                         value = loginName,
                         onValueChange = onLoginNameChange,
@@ -372,7 +428,6 @@ private fun EnrollmentLoginScreen(
                         enabled = !busy,
                         visualTransformation = PasswordVisualTransformation(),
                     )
-
                     if (ownerCodeRequired) {
                         Spacer(modifier = Modifier.height(12.dp))
                         OutlinedTextField(
@@ -384,30 +439,11 @@ private fun EnrollmentLoginScreen(
                             enabled = !busy,
                         )
                     }
-
-                    if (!message.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp),
-                            color = Color(0xFFF4F7FA),
-                        ) {
-                            Text(
-                                text = message,
-                                modifier = Modifier.padding(14.dp),
-                                color = EnrollmentMuted,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
-                    }
-
+                    EnrollmentMessage(message)
                     Spacer(modifier = Modifier.height(18.dp))
-
                     Button(
                         onClick = onSubmit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(54.dp),
+                        modifier = Modifier.fillMaxWidth().height(54.dp),
                         enabled = !busy,
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = EnrollmentBlue),
@@ -419,24 +455,104 @@ private fun EnrollmentLoginScreen(
                                 color = Color.White,
                             )
                         } else {
-                            Text(
-                                text = if (ownerCodeRequired) "Xác minh" else "Đăng nhập",
-                                fontWeight = FontWeight.Bold,
-                            )
+                            Text(if (ownerCodeRequired) "Xác minh" else "Đăng nhập", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.weight(1f))
-
-            Text(
-                text = "Phiên quản trị chỉ dùng trong lúc đăng ký và sẽ được đăng xuất khi rời chức năng này.",
+@Composable
+private fun EnrollmentDeviceSetupScreen(
+    points: List<AttendancePointSummary>,
+    busy: Boolean,
+    message: String?,
+    onBack: () -> Unit,
+    onProvision: (AttendancePointSummary, String) -> Unit,
+) {
+    var deviceName by remember { mutableStateOf("Máy chấm công - " + Build.MODEL.take(60)) }
+    EnrollmentSurface {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(18.dp),
+        ) {
+            EnrollmentTopBar(title = "Thiết lập máy chấm công", onBack = onBack)
+            Spacer(modifier = Modifier.height(14.dp))
+            OutlinedTextField(
+                value = deviceName,
+                onValueChange = { deviceName = it.take(128) },
                 modifier = Modifier.fillMaxWidth(),
-                color = EnrollmentMuted,
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodySmall,
+                label = { Text("Tên máy") },
+                singleLine = true,
+                enabled = !busy,
             )
+            EnrollmentMessage(message)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Chọn đúng nơi làm việc của máy này",
+                color = EnrollmentNavy,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            if (points.isEmpty()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color.White,
+                ) {
+                    Text(
+                        text = "Chưa có nơi chấm công đang hoạt động. Hãy thiết lập nơi chấm công trên Công Ty trước.",
+                        modifier = Modifier.padding(18.dp),
+                        color = EnrollmentMuted,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(points, key = { it.id }) { point ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color.White,
+                            shadowElevation = 3.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = point.branchName ?: point.name,
+                                        color = EnrollmentNavy,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Text(
+                                        text = point.name,
+                                        color = EnrollmentMuted,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                Button(
+                                    onClick = { onProvision(point, deviceName.trim()) },
+                                    enabled = !busy && deviceName.isNotBlank(),
+                                    shape = RoundedCornerShape(14.dp),
+                                ) {
+                                    Text("Chọn")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -446,6 +562,7 @@ private fun EnrollmentEmployeeListScreen(
     adminName: String,
     query: String,
     employees: List<EmployeeSummary>,
+    registeredEmployeeIds: Set<String>,
     busy: Boolean,
     message: String?,
     onQueryChange: (String) -> Unit,
@@ -459,16 +576,14 @@ private fun EnrollmentEmployeeListScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(18.dp),
         ) {
             EnrollmentTopBar(
                 title = "Chọn nhân sự",
                 subtitle = if (adminName.isBlank()) null else "Quản trị: " + adminName,
                 onBack = onBack,
             )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
+            Spacer(modifier = Modifier.height(12.dp))
             OutlinedTextField(
                 value = query,
                 onValueChange = onQueryChange,
@@ -476,20 +591,9 @@ private fun EnrollmentEmployeeListScreen(
                 label = { Text("Tìm theo tên, mã hoặc phòng/bộ phận") },
                 singleLine = true,
             )
-
-            if (!message.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
+            EnrollmentMessage(message)
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 10.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -502,34 +606,16 @@ private fun EnrollmentEmployeeListScreen(
                     Text(if (busy) "Đang tải..." else "Tải lại")
                 }
             }
-
-            if (employees.isEmpty() && !busy) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color.White,
-                ) {
-                    Text(
-                        text = "Không tìm thấy nhân sự phù hợp.",
-                        modifier = Modifier.padding(20.dp),
-                        color = EnrollmentMuted,
-                        textAlign = TextAlign.Center,
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(employees, key = { it.id }) { employee ->
+                    EmployeeEnrollmentCard(
+                        employee = employee,
+                        registered = registeredEmployeeIds.contains(employee.id),
+                        onSelect = { onSelect(employee) },
                     )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(
-                        items = employees,
-                        key = { it.id },
-                    ) { employee ->
-                        EmployeeEnrollmentCard(
-                            employee = employee,
-                            onSelect = { onSelect(employee) },
-                        )
-                    }
                 }
             }
         }
@@ -539,6 +625,7 @@ private fun EnrollmentEmployeeListScreen(
 @Composable
 private fun EmployeeEnrollmentCard(
     employee: EmployeeSummary,
+    registered: Boolean,
     onSelect: () -> Unit,
 ) {
     Surface(
@@ -547,12 +634,8 @@ private fun EmployeeEnrollmentCard(
         color = Color.White,
         shadowElevation = 3.dp,
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     modifier = Modifier.size(44.dp),
                     shape = CircleShape,
@@ -568,48 +651,31 @@ private fun EmployeeEnrollmentCard(
                 }
                 Spacer(modifier = Modifier.size(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = employee.fullName,
-                        color = EnrollmentNavy,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "Mã nhân sự: " + employee.code,
-                        color = EnrollmentMuted,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    val organization = listOfNotNull(employee.departmentName, employee.positionName)
-                        .joinToString(" • ")
+                    Text(employee.fullName, color = EnrollmentNavy, fontWeight = FontWeight.Bold)
+                    Text("Mã nhân sự: " + employee.code, color = EnrollmentMuted, style = MaterialTheme.typography.bodySmall)
+                    val organization = listOfNotNull(employee.departmentName, employee.positionName).joinToString(" • ")
                     if (organization.isNotBlank()) {
-                        Text(
-                            text = organization,
-                            color = EnrollmentMuted,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        Text(organization, color = EnrollmentMuted, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(color = Color(0xFFE8EEF3))
             Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "Trạng thái khuôn mặt: Chưa kết nối",
+                    text = if (registered) "Đã đăng ký" else "Chưa đăng ký",
                     modifier = Modifier.weight(1f),
-                    color = Color(0xFF7B8794),
+                    color = if (registered) EnrollmentGreen else EnrollmentMuted,
                     style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
                 )
                 Button(
                     onClick = onSelect,
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = EnrollmentBlue),
                 ) {
-                    Text("Chọn")
+                    Text(if (registered) "Cập nhật" else "Đăng ký")
                 }
             }
         }
@@ -619,25 +685,55 @@ private fun EmployeeEnrollmentCard(
 @Composable
 private fun EnrollmentCaptureScreen(
     employee: EmployeeSummary,
+    adminToken: String,
     onBack: () -> Unit,
     onComplete: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val embedder = remember { FaceNetEmbedder(context) }
+    DisposableEffect(Unit) {
+        onDispose { embedder.close() }
+    }
+
     val poses = remember {
-        listOf(
-            EnrollmentPose.FRONT,
-            EnrollmentPose.TURN_LEFT,
-            EnrollmentPose.TURN_RIGHT,
-        )
+        listOf(EnrollmentPose.FRONT, EnrollmentPose.TURN_LEFT, EnrollmentPose.TURN_RIGHT)
     }
     var stepIndex by remember(employee.id) { mutableIntStateOf(0) }
     var stableFrames by remember(employee.id) { mutableIntStateOf(0) }
+    var readyToCapture by remember(employee.id) { mutableStateOf(false) }
+    var processing by remember(employee.id) { mutableStateOf(false) }
     var guidance by remember(employee.id) { mutableStateOf("Đưa khuôn mặt vào khung.") }
-    var completed by remember(employee.id) { mutableStateOf(false) }
+    var embeddings by remember(employee.id) { mutableStateOf<List<FloatArray>>(emptyList()) }
+    var saveKey by remember(employee.id) { mutableStateOf<String?>(null) }
+    var saveError by remember(employee.id) { mutableStateOf<String?>(null) }
 
     val pose = poses[stepIndex.coerceIn(poses.indices)]
 
-    LaunchedEffect(completed) {
-        if (completed) onComplete()
+    fun saveTemplate(vectors: List<FloatArray>) {
+        if (processing) return
+        processing = true
+        saveError = null
+        val key = saveKey ?: IdempotencyKeys.create("attendance-face-enroll").also { saveKey = it }
+        scope.launch {
+            try {
+                when (
+                    val result = FaceApiClient.enrollTemplate(
+                        adminToken = adminToken,
+                        employeeId = employee.id,
+                        embeddings = vectors,
+                        idempotencyKey = key,
+                    )
+                ) {
+                    is ApiResult.Success -> onComplete()
+                    is ApiResult.Failure -> saveError = result.message
+                }
+            } catch (_: Exception) {
+                saveError = "Không lưu được mẫu khuôn mặt. Vui lòng kiểm tra mạng và thử lại."
+            } finally {
+                processing = false
+            }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -647,35 +743,56 @@ private fun EnrollmentCaptureScreen(
             onFrameChanged = { frame ->
                 val matches = EnrollmentPosePolicy.matches(pose, frame)
                 guidance = enrollmentGuidance(pose, frame, matches)
-
                 if (matches) {
                     stableFrames += 1
-                    if (stableFrames >= ENROLLMENT_STABLE_FRAMES) {
-                        stableFrames = 0
-                        if (stepIndex >= poses.lastIndex) {
-                            completed = true
-                        } else {
-                            stepIndex += 1
-                        }
-                    }
+                    readyToCapture = stableFrames >= ENROLLMENT_STABLE_FRAMES
                 } else {
                     stableFrames = 0
+                    readyToCapture = false
+                }
+            },
+            onFaceSample = { sample: FaceSample ->
+                if (!readyToCapture || processing || !EnrollmentPosePolicy.matches(pose, sample.frame)) {
+                    sample.bitmap.recycle()
+                    return@FaceCameraPreview
+                }
+                readyToCapture = false
+                stableFrames = 0
+                processing = true
+                scope.launch {
+                    try {
+                        val embedding = withContext(Dispatchers.Default) {
+                            embedder.embed(sample.bitmap)
+                        }
+                        sample.bitmap.recycle()
+                        val updated = embeddings + embedding
+                        embeddings = updated
+                        if (stepIndex >= poses.lastIndex) {
+                            processing = false
+                            saveTemplate(updated)
+                        } else {
+                            stepIndex += 1
+                            processing = false
+                        }
+                    } catch (_: Exception) {
+                        sample.bitmap.recycle()
+                        guidance = "Không xử lý được mẫu này. Vui lòng thử lại."
+                        processing = false
+                    }
                 }
             },
         )
 
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Black.copy(alpha = 0.62f),
-                            Color.Transparent,
-                            Color.Black.copy(alpha = 0.72f),
-                        ),
+            modifier = Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Black.copy(alpha = 0.62f),
+                        Color.Transparent,
+                        Color.Black.copy(alpha = 0.72f),
                     ),
                 ),
+            ),
         )
 
         Column(
@@ -683,34 +800,20 @@ private fun EnrollmentCaptureScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
                     onClick = onBack,
+                    enabled = !processing,
                     colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
                 ) {
                     Text("‹ Quay lại")
                 }
-                Column(
-                    modifier = Modifier.weight(1f),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    Text(
-                        text = employee.fullName,
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = employee.code,
-                        color = Color.White.copy(alpha = 0.76f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                    Text(employee.fullName, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(employee.code, color = Color.White.copy(alpha = 0.76f), style = MaterialTheme.typography.bodySmall)
                 }
             }
 
@@ -721,14 +824,13 @@ private fun EnrollmentCaptureScreen(
                     .fillMaxWidth(0.80f)
                     .aspectRatio(0.78f)
                     .border(
-                        width = 3.dp,
-                        color = if (stableFrames > 0) EnrollmentGreen else Color.White,
-                        shape = RoundedCornerShape(38.dp),
+                        3.dp,
+                        if (readyToCapture) EnrollmentGreen else Color.White,
+                        RoundedCornerShape(38.dp),
                     ),
             )
 
             Spacer(modifier = Modifier.height(20.dp))
-
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(22.dp),
@@ -739,45 +841,33 @@ private fun EnrollmentCaptureScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        text = "Lượt " + (stepIndex + 1) + "/" + poses.size,
+                        text = if (embeddings.size >= poses.size) "Đang lưu mẫu khuôn mặt" else "Mẫu " + (stepIndex + 1) + "/" + poses.size,
                         color = Color.White.copy(alpha = 0.74f),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        text = poseTitle(pose),
+                        text = if (embeddings.size >= poses.size) "Đang hoàn tất" else poseTitle(pose),
                         color = Color.White,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = guidance,
+                        text = saveError ?: if (processing) "Vui lòng giữ nguyên trong giây lát." else guidance,
                         color = Color.White.copy(alpha = 0.88f),
-                        style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        poses.indices.forEach { index ->
-                            Box(
-                                modifier = Modifier
-                                    .size(width = 46.dp, height = 6.dp)
-                                    .background(
-                                        color = when {
-                                            index < stepIndex -> EnrollmentGreen
-                                            index == stepIndex -> Color.White
-                                            else -> Color.White.copy(alpha = 0.28f)
-                                        },
-                                        shape = RoundedCornerShape(3.dp),
-                                    ),
-                            )
+                    if (saveError != null && embeddings.size >= poses.size) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { saveTemplate(embeddings) },
+                            enabled = !processing,
+                        ) {
+                            Text("Lưu lại")
                         }
                     }
                 }
             }
-
             Spacer(modifier = Modifier.height(8.dp))
         }
     }
@@ -793,7 +883,6 @@ private fun EnrollmentCompleteScreen(
     val formatter = remember {
         DateTimeFormatter.ofPattern("HH:mm 'ngày' dd/MM/yyyy", Locale("vi", "VN"))
     }
-
     EnrollmentSurface {
         Column(
             modifier = Modifier
@@ -804,7 +893,6 @@ private fun EnrollmentCompleteScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(modifier = Modifier.weight(1f))
-
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(28.dp),
@@ -821,79 +909,58 @@ private fun EnrollmentCompleteScreen(
                         color = EnrollmentGreen.copy(alpha = 0.12f),
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                text = "✓",
-                                color = EnrollmentGreen,
-                                style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
+                            Text("✓", color = EnrollmentGreen, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                         }
                     }
                     Spacer(modifier = Modifier.height(16.dp))
+                    Text("Đăng ký thành công", color = EnrollmentNavy, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text(employee.fullName, color = EnrollmentNavy, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Mã nhân sự: " + employee.code, color = EnrollmentMuted)
+                    Text(completedAt.format(formatter), color = EnrollmentMuted, style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "Đã thu đủ hướng khuôn mặt",
-                        color = EnrollmentNavy,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
+                        text = "Mẫu nhận diện đã được lưu vào hệ thống Công Ty. Ảnh camera không được lưu lâu dài.",
+                        color = EnrollmentMuted,
                         textAlign = TextAlign.Center,
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = employee.fullName,
-                        color = EnrollmentNavy,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = "Mã nhân sự: " + employee.code,
-                        color = EnrollmentMuted,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        text = completedAt.format(formatter),
-                        color = EnrollmentMuted,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Spacer(modifier = Modifier.height(18.dp))
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFF4F7FA),
-                    ) {
-                        Text(
-                            text = "Thiết bị đã hoàn tất 3 lượt quét hướng dẫn và không lưu ảnh thô. Mẫu nhận diện sẽ chỉ được ghi vào hệ thống khi dịch vụ nhận diện khuôn mặt được kết nối.",
-                            modifier = Modifier.padding(14.dp),
-                            color = EnrollmentMuted,
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
                     Spacer(modifier = Modifier.height(20.dp))
                     Button(
                         onClick = onNextEmployee,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
                         shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = EnrollmentBlue),
                     ) {
                         Text("Đăng ký người tiếp theo", fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedButton(
                         onClick = onHome,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp),
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
                         shape = RoundedCornerShape(16.dp),
                     ) {
                         Text("Về màn hình chính")
                     }
                 }
             }
-
             Spacer(modifier = Modifier.weight(1f))
         }
+    }
+}
+
+@Composable
+private fun EnrollmentMessage(message: String?) {
+    if (message.isNullOrBlank()) return
+    Spacer(modifier = Modifier.height(10.dp))
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFFF4F7FA),
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.padding(14.dp),
+            color = EnrollmentMuted,
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }
 
@@ -901,23 +968,17 @@ private fun EnrollmentCompleteScreen(
 private fun EnrollmentSurface(
     content: @Composable () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF3F6F9)),
-    ) {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFFF3F6F9))) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White,
-                            Color(0xFFF3F6F9),
-                            EnrollmentNavy.copy(alpha = 0.10f),
-                        ),
+            modifier = Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.White,
+                        Color(0xFFF3F6F9),
+                        EnrollmentNavy.copy(alpha = 0.10f),
                     ),
                 ),
+            ),
         )
         content()
     }
@@ -929,27 +990,13 @@ private fun EnrollmentTopBar(
     subtitle: String? = null,
     onBack: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(onClick = onBack) {
-            Text("‹  Quay lại")
-        }
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onBack) { Text("‹  Quay lại") }
         Spacer(modifier = Modifier.weight(1f))
         Column(horizontalAlignment = Alignment.End) {
-            Text(
-                text = title,
-                color = EnrollmentNavy,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
+            Text(title, color = EnrollmentNavy, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             if (!subtitle.isNullOrBlank()) {
-                Text(
-                    text = subtitle,
-                    color = EnrollmentMuted,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text(subtitle, color = EnrollmentMuted, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -965,20 +1012,17 @@ private fun enrollmentGuidance(
     pose: EnrollmentPose,
     frame: FaceFrame,
     matches: Boolean,
-): String {
-    return when {
-        frame.faceCount == 0 -> "Đưa khuôn mặt vào giữa khung."
-        frame.faceCount > 1 -> "Vui lòng để một người trước camera."
-        FaceReadinessPolicy.evaluate(frame) == FaceGuidance.MOVE_CLOSER ->
-            "Tiến gần camera hơn một chút."
-        abs(frame.rollDegrees) > 15f -> "Giữ đầu thẳng, không nghiêng sang vai."
-        matches -> "Đúng vị trí. Giữ yên trong giây lát."
-        else -> when (pose) {
-            EnrollmentPose.FRONT -> "Nhìn thẳng vào camera."
-            EnrollmentPose.TURN_LEFT -> "Xoay mặt nhẹ sang trái."
-            EnrollmentPose.TURN_RIGHT -> "Xoay mặt nhẹ sang phải."
-        }
+): String = when {
+    frame.faceCount == 0 -> "Đưa khuôn mặt vào giữa khung."
+    frame.faceCount > 1 -> "Vui lòng để một người trước camera."
+    FaceReadinessPolicy.evaluate(frame) == FaceGuidance.MOVE_CLOSER -> "Tiến gần camera hơn một chút."
+    abs(frame.rollDegrees) > 15f -> "Giữ đầu thẳng, không nghiêng sang vai."
+    matches -> "Đúng vị trí. Giữ yên trong giây lát."
+    else -> when (pose) {
+        EnrollmentPose.FRONT -> "Nhìn thẳng vào camera."
+        EnrollmentPose.TURN_LEFT -> "Xoay mặt nhẹ sang trái."
+        EnrollmentPose.TURN_RIGHT -> "Xoay mặt nhẹ sang phải."
     }
 }
 
-private const val ENROLLMENT_STABLE_FRAMES = 7
+private const val ENROLLMENT_STABLE_FRAMES = 5
