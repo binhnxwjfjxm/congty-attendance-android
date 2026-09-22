@@ -36,7 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -129,17 +129,12 @@ private fun BrandBackground(
             .background(SoftBackground),
     ) {
         Image(
-            painter = painterResource(R.drawable.logo),
+            painter = painterResource(R.drawable.anh_nen),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer(
-                    alpha = 0.15f,
-                    scaleX = 1.75f,
-                    scaleY = 1.75f,
-                )
-                .blur(30.dp),
+                .graphicsLayer(alpha = 0.42f),
         )
 
         Box(
@@ -148,15 +143,46 @@ private fun BrandBackground(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color.White.copy(alpha = 0.78f),
-                            SoftBackground.copy(alpha = 0.88f),
-                            BrandNavy.copy(alpha = 0.18f),
+                            Color.White.copy(alpha = 0.68f),
+                            SoftBackground.copy(alpha = 0.62f),
+                            BrandNavy.copy(alpha = 0.12f),
                         ),
                     ),
                 ),
         )
 
         content()
+    }
+}
+
+@Composable
+private fun BrandLogoCard(
+    compact: Boolean = false,
+) {
+    val frameWidth = if (compact) 68.dp else 76.dp
+    val frameHeight = if (compact) 40.dp else 44.dp
+    val imageWidth = if (compact) 92.dp else 104.dp
+    val imageHeight = if (compact) 54.dp else 62.dp
+    val cornerRadius = if (compact) 12.dp else 14.dp
+
+    Surface(
+        shape = RoundedCornerShape(cornerRadius),
+        color = Color.White.copy(alpha = 0.96f),
+        shadowElevation = if (compact) 3.dp else 4.dp,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = frameWidth, height = frameHeight)
+                .clip(RoundedCornerShape(cornerRadius)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.logo),
+                contentDescription = "Logo Công Ty",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(width = imageWidth, height = imageHeight),
+            )
+        }
     }
 }
 
@@ -193,20 +219,7 @@ private fun HomeContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color.White.copy(alpha = 0.95f),
-                    shadowElevation = 6.dp,
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.logo),
-                        contentDescription = "Logo Công Ty",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .size(width = 98.dp, height = 58.dp)
-                            .padding(8.dp),
-                    )
-                }
+                BrandLogoCard()
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
@@ -455,19 +468,7 @@ private fun ScannerContent(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = Color.White.copy(alpha = 0.95f),
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.logo),
-                        contentDescription = "Logo Công Ty",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .size(width = 76.dp, height = 46.dp)
-                            .padding(6.dp),
-                    )
-                }
+                BrandLogoCard(compact = true)
 
                 Spacer(modifier = Modifier.size(12.dp))
 
