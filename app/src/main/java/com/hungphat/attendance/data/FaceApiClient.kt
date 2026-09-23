@@ -290,7 +290,7 @@ object FaceApiClient {
         val error = json.optJSONObject("error")
         val code = error?.optString("code")?.takeIf { it.isNotBlank() }
         val publicMessage = when (code) {
-            "FACE_DEVICE_UNAUTHORIZED" -> "Máy chấm công chưa được thiết lập hoặc đã bị thu hồi."
+            "FACE_DEVICE_UNAUTHORIZED" -> "Máy chấm công chưa được xác thực. Vui lòng thiết lập lại máy."
             "FACE_NOT_RECOGNIZED" -> "Không nhận diện được nhân sự. Vui lòng thử lại."
             "FACE_MATCH_AMBIGUOUS" -> "Chưa xác định chắc chắn nhân sự. Vui lòng thử lại."
             "FACE_TEMPLATE_INVALID" -> "Dữ liệu khuôn mặt chưa đủ chất lượng."

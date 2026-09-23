@@ -3,6 +3,7 @@ package com.hungphat.attendance.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -38,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -52,6 +54,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.hungphat.attendance.camera.EnrollmentHoldPolicy
 import com.hungphat.attendance.camera.EnrollmentPose
 import com.hungphat.attendance.camera.EnrollmentPosePolicy
 import com.hungphat.attendance.camera.FaceFrame
@@ -728,7 +731,7 @@ private fun EnrollmentCaptureScreen(
         listOf(EnrollmentPose.FRONT, EnrollmentPose.TURN_LEFT, EnrollmentPose.TURN_RIGHT)
     }
     var stepIndex by remember(employee.id) { mutableIntStateOf(0) }
-    var stableFrames by remember(employee.id) { mutableIntStateOf(0) }
+    var stableSinceMs by remember(employee.id) { mutableLongStateOf(0L) }
     var readyToCapture by remember(employee.id) { mutableStateOf(false) }
     var processing by remember(employee.id) { mutableStateOf(false) }
     var guidance by remember(employee.id) { mutableStateOf("Đưa khuôn mặt vào khung.") }
@@ -770,13 +773,20 @@ private fun EnrollmentCaptureScreen(
             onStateChanged = { _: FaceScanState -> },
             onFrameChanged = { frame ->
                 val matches = EnrollmentPosePolicy.matches(pose, frame)
-                guidance = enrollmentGuidance(pose, frame, matches)
                 if (matches) {
-                    stableFrames += 1
-                    readyToCapture = stableFrames >= ENROLLMENT_STABLE_FRAMES
+                    val nowMs = SystemClock.elapsedRealtime()
+                    if (stableSinceMs == 0L) stableSinceMs = nowMs
+                    val remainingMs = EnrollmentHoldPolicy.remainingMillis(stableSinceMs, nowMs)
+                    readyToCapture = remainingMs == 0L
+                    guidance = if (readyToCapture) {
+                        "Đã đủ ổn định. Đang lấy mẫu..."
+                    } else {
+                        "Đúng vị trí. Giữ yên thêm " + holdSecondsText(remainingMs) + " giây."
+                    }
                 } else {
-                    stableFrames = 0
+                    stableSinceMs = 0L
                     readyToCapture = false
+                    guidance = enrollmentGuidance(pose, frame, matches)
                 }
             },
             onFaceSample = { sample: FaceSample ->
@@ -785,7 +795,7 @@ private fun EnrollmentCaptureScreen(
                     return@FaceCameraPreview
                 }
                 readyToCapture = false
-                stableFrames = 0
+                stableSinceMs = 0L
                 processing = true
                 scope.launch {
                     try {
@@ -1053,4 +1063,7 @@ private fun enrollmentGuidance(
     }
 }
 
-private const val ENROLLMENT_STABLE_FRAMES = 5
+private fun holdSecondsText(remainingMs: Long): String {
+    val tenths = ((remainingMs.coerceAtLeast(0L) + 99L) / 100L).coerceAtLeast(1L)
+    return (tenths / 10L).toString() + "." + (tenths % 10L).toString()
+}
