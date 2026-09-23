@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.hungphat.attendance.R
 import com.hungphat.attendance.camera.FaceScanState
+import com.hungphat.attendance.data.ApiResult
+import com.hungphat.attendance.data.FaceApiClient
+import com.hungphat.attendance.security.DeviceCredentialStore
 import kotlinx.coroutines.delay
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -68,12 +71,86 @@ private enum class TerminalPage {
     ENROLLMENT,
 }
 
+private enum class TerminalSystemTone {
+    CHECKING,
+    READY,
+    WARNING,
+    OFFLINE,
+}
+
+private data class TerminalSystemStatus(
+    val title: String,
+    val detail: String,
+    val tone: TerminalSystemTone,
+)
+
 @Composable
 fun AttendanceTerminalScreen() {
     val context = LocalContext.current
+    val deviceStore = remember { DeviceCredentialStore(context) }
     var page by remember { mutableStateOf(TerminalPage.HOME) }
     var permissionDenied by remember { mutableStateOf(false) }
     var scanState by remember { mutableStateOf(FaceScanState.WAITING) }
+    var systemStatus by remember {
+        mutableStateOf(
+            TerminalSystemStatus(
+                title = "Đang kiểm tra hệ thống",
+                detail = "Vui lòng chờ",
+                tone = TerminalSystemTone.CHECKING,
+            ),
+        )
+    }
+
+    LaunchedEffect(page) {
+        if (page != TerminalPage.HOME) return@LaunchedEffect
+        val storedDevice = deviceStore.load()
+        if (storedDevice == null) {
+            systemStatus = TerminalSystemStatus(
+                title = "Chưa thiết lập máy chấm công",
+                detail = "Cần quản trị thiết lập một lần",
+                tone = TerminalSystemTone.WARNING,
+            )
+            return@LaunchedEffect
+        }
+
+        systemStatus = TerminalSystemStatus(
+            title = "Đang kiểm tra hệ thống",
+            detail = storedDevice.attendancePointName ?: storedDevice.name,
+            tone = TerminalSystemTone.CHECKING,
+        )
+        try {
+            when (val result = FaceApiClient.verifyDevice(storedDevice.credential)) {
+                is ApiResult.Success -> {
+                    systemStatus = TerminalSystemStatus(
+                        title = "Máy chấm công sẵn sàng",
+                        detail = result.data.attendancePointName ?: result.data.name,
+                        tone = TerminalSystemTone.READY,
+                    )
+                }
+                is ApiResult.Failure -> {
+                    systemStatus = if (result.code == "FACE_DEVICE_UNAUTHORIZED") {
+                        TerminalSystemStatus(
+                            title = "Máy cần thiết lập lại",
+                            detail = "Xác thực thiết bị không còn hiệu lực",
+                            tone = TerminalSystemTone.WARNING,
+                        )
+                    } else {
+                        TerminalSystemStatus(
+                            title = "Chưa kết nối được hệ thống",
+                            detail = result.message,
+                            tone = TerminalSystemTone.OFFLINE,
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            systemStatus = TerminalSystemStatus(
+                title = "Chưa kết nối được hệ thống",
+                detail = "Kiểm tra kết nối mạng",
+                tone = TerminalSystemTone.OFFLINE,
+            )
+        }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -88,6 +165,7 @@ fun AttendanceTerminalScreen() {
     when (page) {
         TerminalPage.HOME -> HomeContent(
             permissionDenied = permissionDenied,
+            systemStatus = systemStatus,
             onStartAttendance = {
                 val granted = ContextCompat.checkSelfPermission(
                     context,
@@ -190,6 +268,7 @@ private fun BrandLogoCard(
 @Composable
 private fun HomeContent(
     permissionDenied: Boolean,
+    systemStatus: TerminalSystemStatus,
     onStartAttendance: () -> Unit,
     onStartEnrollment: () -> Unit,
 ) {
@@ -402,22 +481,29 @@ private fun HomeContent(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val statusColor = when (systemStatus.tone) {
+                        TerminalSystemTone.READY -> BrandGreen
+                        TerminalSystemTone.WARNING -> Color(0xFFB7791F)
+                        TerminalSystemTone.OFFLINE -> MaterialTheme.colorScheme.error
+                        TerminalSystemTone.CHECKING -> Color(0xFF8A94A6)
+                    }
                     Box(
                         modifier = Modifier
                             .size(9.dp)
-                            .background(Color(0xFF8A94A6), CircleShape),
+                            .background(statusColor, CircleShape),
                     )
                     Spacer(modifier = Modifier.size(8.dp))
                     Text(
-                        text = "Chưa kết nối hệ thống",
+                        text = systemStatus.title,
                         modifier = Modifier.weight(1f),
                         color = BrandMuted,
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        text = "Đồng bộ: —",
+                        text = systemStatus.detail,
                         color = Color(0xFF7B8794),
                         style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.End,
                     )
                 }
             }
