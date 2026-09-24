@@ -365,8 +365,8 @@ fun FaceAttendanceScreen(
             } else {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(0.80f)
-                        .aspectRatio(0.78f)
+                        .fillMaxWidth(0.84f)
+                        .aspectRatio(0.64f)
                         .border(
                             width = 3.dp,
                             color = if (scanState == FaceScanState.READY) AttendanceGreen else Color.White,
